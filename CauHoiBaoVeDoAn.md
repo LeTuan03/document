@@ -20,6 +20,11 @@
 - [VIII. Câu hỏi về Design Pattern](#viii-câu-hỏi-về-design-pattern)
 - [IX. Câu hỏi kỹ thuật nâng cao](#ix-câu-hỏi-kỹ-thuật-nâng-cao)
 - [X. Câu hỏi phản biện](#x-câu-hỏi-phản-biện)
+- [XI. Câu hỏi chuyên sâu về bảo mật & lỗ hổng](#xi-câu-hỏi-chuyên-sâu-về-bảo-mật--lỗ-hổng)
+- [XII. Câu hỏi hóc búa về Frontend](#xii-câu-hỏi-hóc-búa-về-frontend)
+- [XIII. Câu hỏi hóc búa về Backend](#xiii-câu-hỏi-hóc-búa-về-backend)
+- [XIV. Câu hỏi về lỗ hổng thiết kế & Trade-off](#xiv-câu-hỏi-về-lỗ-hổng-thiết-kế--trade-off)
+- [XV. Câu hỏi tình huống giả định (Scenario-based)](#xv-câu-hỏi-tình-huống-giả-định-scenario-based)
 
 ---
 
@@ -632,12 +637,804 @@ Address {
 
 ---
 
+---
+
+## XI. Câu hỏi chuyên sâu về bảo mật & lỗ hổng
+
+> **Mức độ: KHÓ** - Thầy cô am hiểu về bảo mật sẽ hỏi những câu này
+
+### Câu 46: JWT dùng HS512 (symmetric key) — tại sao không dùng RS256 (asymmetric key)? Rủi ro là gì?
+
+**Trả lời:**
+
+- **HS512 (HMAC-SHA512):** Dùng **một secret key** duy nhất cho cả sign lẫn verify token
+- **RS256 (RSA-SHA256):** Dùng **private key** để sign và **public key** để verify
+
+**Lý do chọn HS512:**
+- Hệ thống chỉ có **1 backend server** verify token → không cần tách private/public key
+- HS512 **nhanh hơn** RS256 về mặt tính toán
+- Cấu hình **đơn giản hơn**, không cần quản lý cặp key
+
+**Rủi ro:**
+- Nếu secret key bị lộ → attacker có thể **tự tạo token hợp lệ** (với RS256 thì chỉ lộ public key, không thể tạo token)
+- Không thể chia sẻ khả năng verify cho service khác mà không lộ signing key
+
+**Nếu hệ thống mở rộng sang microservices** thì nên chuyển sang RS256 để các service khác chỉ cần public key để verify.
+
+---
+
+### Câu 47: Token lưu trong localStorage — có lỗ hổng bảo mật gì? Tại sao không dùng HttpOnly Cookie?
+
+**Trả lời:**
+
+**Rủi ro của localStorage:**
+- Bất kỳ JavaScript nào chạy trên trang đều **đọc được** localStorage → nếu có lỗ XSS, attacker lấy được token
+- Không tự động hết hạn khi đóng tab
+
+**Tại sao không dùng HttpOnly Cookie:**
+- HttpOnly Cookie **không bị JavaScript đọc** → an toàn hơn với XSS
+- Nhưng nếu dùng Cookie → phải **bật lại CSRF protection** vì browser tự động gửi cookie
+- CORS configuration phức tạp hơn (credentials: true, sameSite, secure...)
+- Frontend và backend có thể ở **khác domain** → cookie cross-domain rất phức tạp
+
+**Biện pháp giảm thiểu đã áp dụng:**
+- **DOMPurify** sanitize HTML trước khi render → ngăn XSS
+- **Content Security Policy** header: `script-src 'self'` → chặn inline script
+- **X-XSS-Protection** header bật
+- Access token **thời hạn ngắn** (24h) → giảm thiệt hại nếu bị lộ
+
+**Phương án tốt hơn (nếu cải tiến):** Lưu token trong **memory** (biến JavaScript), dùng refresh token trong HttpOnly Cookie để lấy access token mới khi reload trang.
+
+---
+
+### Câu 48: Hệ thống có lỗ hổng NoSQL Injection không? Giải thích cụ thể.
+
+**Trả lời:**
+
+**Điểm an toàn:**
+- Sử dụng **Spring Data MongoDB** với `Criteria` API → tự động parameterize query, không nối string trực tiếp
+- `CriteriaBuilder` chuyển giá trị user input thành **parameter** chứ không ghép vào query string
+
+**Điểm cần lưu ý:**
+- Trong `AdvSearchHelp`, full-text search dùng **regex** trực tiếp từ user input:
+  ```java
+  Criteria.where(column).regex(patternSearch, "i");
+  ```
+- Nếu user gửi pattern phức tạp như `(a+)+$` → có thể gây **ReDoS** (Regular Expression Denial of Service)
+
+**Biện pháp khắc phục:**
+- Escape ký tự đặc biệt regex trước khi search: `Pattern.quote(userInput)`
+- Hoặc giới hạn độ dài search input
+- Hoặc dùng MongoDB text index thay vì regex
+
+---
+
+### Câu 49: CKEditor cho phép nhập HTML tùy ý — có vấn đề XSS không?
+
+**Trả lời:** **Có — đây là lỗ hổng tiềm ẩn nghiêm trọng.**
+
+Cấu hình `htmlSupport` trong CKEditor hiện tại:
+```javascript
+htmlSupport: {
+    allow: [{
+        name: /.*/,         // Cho phép MỌI thẻ HTML
+        styles: true,       // Cho phép inline style
+        classes: [/.*/],    // Cho phép mọi class
+        attributes: [/.*/]  // Cho phép MỌI attribute (kể cả onclick, onerror...)
+    }]
+}
+```
+
+**Rủi ro:** User (hoặc attacker) có thể nhập:
+- `<img src=x onerror="alert(document.cookie)">` → thực thi JavaScript
+- `<script>...</script>` → chạy code tùy ý
+- `<a href="javascript:...">` → redirect exploit
+
+**Tại sao DOMPurify không đủ:**
+- DOMPurify chỉ được gọi ở **một số nơi** khi hiển thị (`dangerouslySetInnerHTML`)
+- Nếu developer quên gọi `sanitizeHtml()` ở bất kỳ chỗ nào → XSS xảy ra
+- Nội dung HTML lưu trong database **chưa được sanitize** → "stored XSS"
+
+**Cách khắc phục:**
+1. Thu hẹp `htmlSupport.allow` — chỉ cho phép thẻ an toàn (b, i, p, br, ul, li, img, a, table)
+2. **Sanitize ở backend** trước khi lưu database (defense in depth)
+3. Luôn dùng `sanitizeHtml()` khi render HTML content
+
+---
+
+### Câu 50: Giải thích cụ thể 3 lớp bảo mật trong PermissionInterceptor?
+
+**Trả lời:** `PermissionInterceptor` kiểm tra **3 lớp tuần tự** trước khi cho phép request:
+
+**Lớp 1 — Token Blacklist (Redis):**
+```java
+// Kiểm tra token đã bị thu hồi chưa
+String tokenId = jwtService.getClaimValue("token_id");
+if (isTokenBlacklisted(tokenId)) {  // Lookup Redis key: "jwt_blacklist_EDengue:{tokenId}"
+    return 401;  // TOKEN_REVOKED
+}
+```
+→ Khi user logout hoặc admin vô hiệu hóa, token_id được thêm vào Redis blacklist.
+
+**Lớp 2 — Password Change Detection:**
+```java
+// Nếu user đã đổi mật khẩu SAU KHI token được cấp → vô hiệu hóa token cũ
+String changePwdInToken = jwtService.getClaimValue("change_password_time");
+String changePwdInDb = userInfo.getChangePasswordDateTime();
+if (!changePwdInDb.equals(changePwdInToken)) {
+    return 401;  // PASSWORD_CHANGED
+}
+```
+→ Khi đổi mật khẩu, `change_password_time` trong DB thay đổi nhưng token vẫn giữ giá trị cũ → mismatch → token bị reject.
+
+**Lớp 3 — Permission Check (@Permission annotation):**
+```java
+Permission permission = handlerMethod.getMethodAnnotation(Permission.class);
+if (permission != null) {
+    if (appFactory.isSuperAdmin()) return true;   // Super Admin bypass
+    if (!appFactory.checkPermission(permission.value())) {
+        return 403;  // FORBIDDEN
+    }
+}
+```
+→ Kiểm tra user có quyền cụ thể được khai báo trên method không.
+
+**Tại sao cần cả 3 lớp:** Mỗi lớp xử lý một trường hợp khác nhau — logout tức thì (lớp 1), đổi mật khẩu bắt buộc đăng nhập lại (lớp 2), và phân quyền chi tiết (lớp 3).
+
+---
+
+### Câu 51: XSS trong Map Popup — em có biết lỗ hổng này không?
+
+**Trả lời:** **Có — đây là điểm cần cải thiện.**
+
+Trong `DengueCaseMap.tsx`, popup hiển thị thông tin ca bệnh bằng cách gán `innerHTML` trực tiếp:
+```javascript
+popupRef.current.innerHTML = `
+    <b>${feature.get("name")}</b><br>
+    Tổng ca: <b>${feature.get("object")?.totalCase}</b>
+`;
+```
+
+**Vấn đề:** `feature.get("name")` lấy từ GeoJSON data — nếu dữ liệu bị tamper (ví dụ tên địa điểm chứa `<script>`), sẽ thực thi code.
+
+**Mức độ rủi ro thực tế:** THẤP — vì dữ liệu GeoJSON đến từ **server do ta quản lý**, không phải user input trực tiếp. Nhưng nếu có lỗ hổng ở API nhập liệu → có thể bị khai thác gián tiếp (stored XSS).
+
+**Cách khắc phục:**
+- Dùng `textContent` thay `innerHTML` cho text thuần
+- Hoặc dùng `DOMPurify.sanitize()` trước khi gán innerHTML
+- Hoặc dùng React component để render popup thay vì thao tác DOM trực tiếp
+
+---
+
+## XII. Câu hỏi hóc búa về Frontend
+
+> **Mức độ: KHÓ** - Thầy cô chuyên về Frontend/React sẽ hỏi
+
+### Câu 52: Khi 2 API call cùng lúc bị 401, token refresh xử lý race condition thế nào?
+
+**Trả lời:** Hệ thống dùng **queue pattern** trong Axios interceptor:
+
+```
+Request A → 401 → isRefreshing = false → gọi refreshToken() → isRefreshing = true
+Request B → 401 → isRefreshing = true  → đẩy vào refreshSubscribers queue (chờ)
+Request C → 401 → isRefreshing = true  → đẩy vào refreshSubscribers queue (chờ)
+
+refreshToken() success → onRefreshed(newToken) → resolve tất cả request trong queue
+                       → Request B retry với new token
+                       → Request C retry với new token
+```
+
+**Cơ chế:**
+- Biến `isRefreshing` (module-level) đảm bảo **chỉ gọi refresh 1 lần**
+- Array `refreshSubscribers` chứa callback của các request đang chờ
+- Khi refresh xong, `onRefreshed()` gọi tất cả callback với token mới
+
+**Lỗ hổng tiềm ẩn:** Nếu `refreshToken()` **thất bại**, biến `isRefreshing` **không được reset** về `false` → tất cả request tiếp theo sẽ bị treo vĩnh viễn trong queue. Cần thêm `finally { isRefreshing = false; }` hoặc timeout mechanism.
+
+---
+
+### Câu 53: Permission cache ở frontend không được refresh — nếu admin thu hồi quyền user thì sao?
+
+**Trả lời:**
+
+**Thực trạng:** Khi app bootstrap, `sessionStore.setSession()` tạo object `permissionGranted` từ `listPermission`:
+```typescript
+session.user.listPermission.forEach(name => {
+    session.permissionGranted[name] = true;  // Cache 1 lần
+});
+```
+
+**Vấn đề:** Nếu admin thu hồi quyền của user đang online:
+1. Frontend vẫn hiển thị menu/button (vì cache chưa thay đổi)
+2. User vẫn thấy trang (ProtectedRoute dùng cache)
+3. **NHƯNG** API call sẽ bị **backend reject** (403) vì backend kiểm tra permission real-time
+
+**Tại sao chấp nhận được:**
+- Frontend chỉ là **UX layer** — security thực sự nằm ở backend `@Permission` annotation
+- Khi user refresh trang hoặc token hết hạn → permission được cập nhật lại
+- Đây là pattern phổ biến trong SPA — **optimistic UI** với **server-side enforcement**
+
+**Cải tiến nếu cần:**
+- Dùng WebSocket/SSE để push permission changes real-time
+- Hoặc polling `/api/auth-plugin/information/getBoostrap` định kỳ (ví dụ 5 phút/lần)
+
+---
+
+### Câu 54: Dexie.js (IndexedDB) có schema rỗng và sync mechanism chưa implement — giải thích?
+
+**Trả lời:**
+
+**Thực trạng:**
+- `OrdDbClientDexie` tạo database với schema `Object.assign({})` — không có table nào được khai báo
+- `HttpInterceptorService.handleSyncDataDexieDb()` là **empty function** — chưa có logic đồng bộ
+
+**Giải thích:** Dexie.js được setup như một **infrastructure sẵn sàng** cho tính năng offline trong tương lai. Hiện tại chỉ sử dụng cho:
+1. **Đếm số lần đăng nhập thất bại** → hiển thị CAPTCHA
+2. **Lưu version setting** → quản lý database migration client-side
+
+**Hướng phát triển:** Khi implement đầy đủ, Dexie.js sẽ:
+- Cache danh sách ca bệnh đã xem offline
+- Cho phép nhập liệu khi mất kết nối, sync lên server khi có mạng
+- Cache master data (tỉnh/huyện/xã) để giảm API call
+
+---
+
+### Câu 55: Giải thích chi tiết cách MobX `observer` tối ưu render trong dự án?
+
+**Trả lời:**
+
+**Nguyên lý:** MobX theo dõi **chính xác property nào** được đọc trong render function:
+```typescript
+const DetailCase = observer(() => {
+    const { detailCaseStore } = useStore();
+    return <Table data={detailCaseStore.currentPageResult.items} />
+    // MobX chỉ re-render khi currentPageResult.items thay đổi
+    // KHÔNG re-render khi searchDataState hay createOrUpdateModal thay đổi
+});
+```
+
+**So sánh với Redux:**
+- Redux: Component subscribe toàn bộ store slice → re-render khi **bất kỳ field nào** trong slice thay đổi
+- MobX: Component **chỉ re-render khi property được đọc** thay đổi → **fine-grained reactivity**
+
+**Trong dự án:**
+- 50+ store nhưng mỗi component chỉ phản ứng với data nó thực sự dùng
+- `observer()` HOC wrap component → tạo **reactive boundary**
+- `makeAutoObservable(this)` trong store → tự động đánh dấu properties là observable
+
+**Nhược điểm:**
+- Debug khó hơn Redux (không có Redux DevTools time-travel)
+- Phải nhớ wrap `observer()` — nếu quên thì component không re-render
+- Implicit dependencies → khó trace data flow trong dự án lớn
+
+---
+
+### Câu 56: Tại sao dùng cả Recharts lẫn Chart.js? Không dư thừa sao?
+
+**Trả lời:**
+
+- **Recharts** (React-native): Dùng cho dashboard chính — tích hợp tốt với React lifecycle, hỗ trợ responsive, animation, export PNG (`recharts-to-png`)
+- **Chart.js** (via react-chartjs-2): Dùng cho các biểu đồ đặc thù mà Recharts không hỗ trợ tốt (ví dụ: stacked mixed chart, radar chart)
+
+**Trade-off:**
+- Tăng bundle size (~100KB thêm cho Chart.js)
+- Nhưng mỗi thư viện có **thế mạnh riêng** cho các loại biểu đồ khác nhau
+- **Cải tiến:** Nên thống nhất về 1 thư viện (ưu tiên Recharts vì React-native) và custom cho các chart đặc biệt
+
+---
+
+### Câu 57: `dangerouslySetInnerHTML` được dùng ở những đâu? Có an toàn không?
+
+**Trả lời:** Các vị trí sử dụng:
+
+| Vị trí | Có sanitize? | Rủi ro |
+|--------|-------------|--------|
+| System Notifications (messageBody) | **Có** — `Utils.sanitizeHtml()` | Thấp |
+| Landing Page (post content) | **Có** — `Utils.sanitizeHtml()` | Thấp |
+| Project Information page | **Có** — `Utils.sanitizeHtml()` | Thấp |
+| Map Popup (DengueCaseMap) | **KHÔNG** — gán `innerHTML` trực tiếp | **Cao** |
+| Forecast Map Popup | **KHÔNG** — gán `innerHTML` trực tiếp | **Cao** |
+
+**Kết luận:** Các nơi dùng `dangerouslySetInnerHTML` đều qua DOMPurify → an toàn. Nhưng map popup dùng **DOM manipulation trực tiếp** (`popupRef.current.innerHTML = ...`) mà không sanitize → cần sửa.
+
+---
+
+## XIII. Câu hỏi hóc búa về Backend
+
+> **Mức độ: KHÓ** - Thầy cô chuyên về Java/Spring Boot sẽ hỏi
+
+### Câu 58: BaseCrudApi phân biệt Create vs Update bằng cách nào? Có lỗ hổng gì không?
+
+**Trả lời:**
+
+**Cơ chế:** Kiểm tra ID có null hay không:
+```java
+if (dto.getId() == null) {
+    // CREATE mới
+    entity = modelMapper.map(dto, entityClass);
+    repository.save(entity);
+} else {
+    // UPDATE entity có sẵn
+    entity = repository.findById(dto.getId());
+    modelMapper.map(dto, entity);
+    repository.save(entity);
+}
+```
+
+**Lỗ hổng tiềm ẩn:**
+- Nếu user **tự set ID** trong create request → hệ thống hiểu là UPDATE
+- Nếu ID không tồn tại trong DB → `findById()` trả null → NullPointerException
+- User có thể **update record của người khác** nếu không có kiểm tra ownership
+
+**Biện pháp đã có:**
+- Hook method `validationBeforeCreateOrUpdate(isCreateNew, dto)` để validate
+- Hook `validationUpdate(dto, entityUpdate)` để kiểm tra quyền sửa
+- `@Transactional(rollbackFor = ...)` đảm bảo rollback khi lỗi
+
+**Cải tiến:** Nên tách thành 2 endpoint riêng `/create` và `/update` thay vì `/create-or-update` để rõ ràng hơn.
+
+---
+
+### Câu 59: Soft Delete có vấn đề gì? Làm sao đảm bảo không query được data đã xóa?
+
+**Trả lời:**
+
+**Cơ chế soft delete:**
+```java
+// Không xóa thật, chỉ đánh dấu
+entity.setIsDeleted(true);
+entity.setDeletionTime(LocalDateTime.now());
+repository.save(entity);
+```
+
+**Đảm bảo filter:**
+- `CriteriaBuilder` **tự động thêm** `Criteria.where("isDeleted").is(false)` vào **mọi query**
+- Đây là single point of enforcement — tất cả search đều đi qua `CriteriaBuilder`
+
+**Vấn đề tiềm ẩn:**
+1. Nếu developer query trực tiếp qua `MongoTemplate` hoặc `repository.findById()` **không qua CriteriaBuilder** → có thể lấy được record đã xóa
+2. `findById()` trong update flow **không kiểm tra isDeleted** → có thể update record đã xóa
+3. Data đã xóa vẫn chiếm **storage space** → cần job dọn dẹp định kỳ
+
+**Cải tiến:**
+- Thêm `@Query("{'isDeleted': false}")` mặc định trên repository method
+- Hoặc dùng MongoDB **TTL index** để tự động xóa cứng sau N ngày
+
+---
+
+### Câu 60: AppFactory dùng Service Locator Pattern — tại sao không dùng Dependency Injection thuần?
+
+**Trả lời:**
+
+**AppFactory hiện tại:**
+```java
+// ConcurrentHashMap cache + applicationContext.getBean()
+public <T> T getService(Class<T> requiredType) {
+    return serviceCache.computeIfAbsent(requiredType, applicationContext::getBean);
+}
+```
+
+**Lý do dùng Service Locator:**
+- Các base class generic (`BaseCrudApi`) không biết trước cần service nào → DI truyền thống không phù hợp
+- `AppFactory` đóng vai trò **trung tâm** cung cấp service cho mọi module
+- Cache trong `ConcurrentHashMap` → hiệu năng tốt, thread-safe
+
+**Nhược điểm (so với DI thuần):**
+- **Implicit dependency** — không nhìn thấy dependency trong constructor → khó test, khó trace
+- **Coupling** với ApplicationContext → khó mock trong unit test
+- Vi phạm **Dependency Inversion Principle** — high-level module phụ thuộc vào concrete factory
+
+**Trade-off chấp nhận được:** Trong dự án có 43+ controller kế thừa BaseCrudApi, việc inject tất cả service qua constructor sẽ tạo **constructor bloat**. AppFactory giúp code gọn hơn với chi phí là implicit dependencies.
+
+---
+
+### Câu 61: Password mặc định admin hardcode trong config — có vấn đề gì?
+
+**Trả lời:**
+
+**Thực trạng:**
+```yaml
+# application.yml
+application:
+  default-password-admin: 'Orenda@123'
+```
+
+**Vấn đề:**
+- Mật khẩu mặc định nằm **trong source code** → nếu repository public thì ai cũng biết
+- Nếu admin không đổi mật khẩu sau cài đặt → hệ thống bị compromise
+
+**Biện pháp giảm thiểu đã có:**
+- Mật khẩu chỉ dùng cho **initial migration** (tạo admin lần đầu)
+- BCrypt hash → mật khẩu lưu trong DB là hash, không phải plaintext
+- Field `mustChangePassword` có thể bắt buộc đổi mật khẩu lần đầu đăng nhập
+
+**Cải tiến:**
+- Đọc default password từ **environment variable** thay vì config file
+- Hoặc generate random password lúc migration, in ra console log
+- Bắt buộc đổi mật khẩu ở lần đăng nhập đầu tiên
+
+---
+
+### Câu 62: BCrypt cost factor mặc định là 10 — có đủ an toàn không?
+
+**Trả lời:**
+
+```java
+new BCryptPasswordEncoder();  // Default cost = 10 → 2^10 = 1,024 iterations
+```
+
+**Phân tích:**
+- Cost 10 là **mức tối thiểu chấp nhận** theo OWASP 2023
+- Mỗi tăng 1 cost → **gấp đôi thời gian** hash
+- Cost 10 ≈ ~100ms/hash, Cost 12 ≈ ~400ms/hash trên server thông thường
+
+**So sánh:**
+
+| Cost | Thời gian/hash | Khuyến nghị |
+|------|---------------|-------------|
+| 10 | ~100ms | Tối thiểu chấp nhận |
+| 11 | ~200ms | Tốt |
+| 12 | ~400ms | **OWASP khuyến nghị** |
+| 14 | ~1.6s | An toàn cao nhưng ảnh hưởng UX |
+
+**Kết luận:** Cost 10 **chấp nhận được** cho đồ án, nhưng production nên dùng **cost 12**. Trade-off: tăng cost → đăng nhập chậm hơn → cần cân bằng giữa bảo mật và UX.
+
+---
+
+### Câu 63: Spring Boot Actuator expose những gì? Có rủi ro gì?
+
+**Trả lời:**
+
+**Endpoints được expose:**
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, configprops, env, loggers, prometheus
+```
+
+**Bảo mật:**
+- `/management/**` yêu cầu **ROLE_ADMIN** trong SecurityFilterChain
+- `/management/health` cho phép public (dùng cho health check)
+
+**Rủi ro nếu cấu hình sai:**
+- `/management/env` → lộ **environment variables**, database URL, secret key
+- `/management/configprops` → lộ **toàn bộ cấu hình** application
+- `/management/loggers` → attacker có thể **thay đổi log level** runtime (ví dụ: bật DEBUG để lộ thông tin nhạy cảm)
+
+**Biện pháp:**
+- Đã yêu cầu ROLE_ADMIN → chỉ admin mới truy cập
+- Production nên chỉ expose `health` và `prometheus`, ẩn `env`/`configprops`
+- Hoặc chạy actuator trên **port riêng** (management.server.port) không public
+
+---
+
+### Câu 64: Tại sao dùng Undertow thay Tomcat? Khác biệt thực tế là gì?
+
+**Trả lời:**
+
+**Undertow:**
+- **Non-blocking I/O** (NIO) based — xử lý nhiều concurrent connection với ít thread hơn
+- **Nhẹ hơn** Tomcat (~20MB vs ~50MB memory footprint)
+- Khởi động **nhanh hơn**
+- Phù hợp cho **REST API** thuần (không cần JSP, Servlet 3.0 advanced features)
+
+**Tomcat:**
+- Mature, battle-tested, cộng đồng lớn hơn
+- Hỗ trợ đầy đủ Servlet spec
+- Nhiều documentation hơn
+
+**Trong dự án:** Backend chỉ serve REST API (không có JSP/server-side rendering) → Undertow là lựa chọn **phù hợp hơn**, nhẹ và nhanh.
+
+---
+
+## XIV. Câu hỏi về lỗ hổng thiết kế & Trade-off
+
+> **Mức độ: RẤT KHÓ** - Thầy cô muốn kiểm tra tư duy kiến trúc
+
+### Câu 65: Hệ thống chỉ có REST API polling — tại sao không dùng WebSocket cho real-time?
+
+**Trả lời:**
+
+**Lý do không dùng WebSocket:**
+- **Độ phức tạp tăng đáng kể:** Cần quản lý connection state, reconnection, heartbeat
+- **Infrastructure:** WebSocket cần reverse proxy (Nginx) cấu hình đặc biệt, load balancer phải hỗ trợ sticky session
+- **Scaling:** Mỗi WebSocket connection giữ **persistent TCP connection** → tốn resource server
+- **Use case chưa đủ mạnh:** Dữ liệu dịch tễ không thay đổi real-time theo giây — cập nhật theo giờ/ngày là đủ
+
+**Khi nào nên thêm WebSocket:**
+- Khi có chức năng **chat giữa các cán bộ y tế**
+- Khi cần **alert real-time** khi phát hiện ổ dịch mới
+- Khi có nhiều user cùng **edit data đồng thời** cần sync
+
+**Giải pháp trung gian:** **Server-Sent Events (SSE)** — đơn giản hơn WebSocket, một chiều server→client, phù hợp cho push notification.
+
+---
+
+### Câu 66: MongoDB không có schema validation — làm sao đảm bảo data integrity?
+
+**Trả lời:**
+
+**Các lớp validation:**
+
+1. **Frontend validation:** Ant Design Form + Yup schema validation → check trước khi gửi API
+2. **Backend DTO validation:** Jakarta Validation (`@NotNull`, `@NotEmpty`, `@Size`) trên DTO class
+3. **Service layer validation:** Hook methods `validationBeforeCreateOrUpdate()` cho business rules
+4. **MongoDB schema validation (có thể thêm):**
+   ```javascript
+   db.createCollection("detailCase", {
+     validator: { $jsonSchema: { ... } }
+   })
+   ```
+
+**Trade-off:**
+- MongoDB **cố ý** không enforce schema → linh hoạt cho data evolve
+- Nhưng validation ở **application layer** đã đảm bảo data integrity
+- Nếu cần strict → dùng MongoDB JSON Schema Validation ở database level
+
+---
+
+### Câu 67: Lưu cả ID lẫn Name trong Address model — có vi phạm normalization? Đồng bộ thế nào khi tên tỉnh thay đổi?
+
+**Trả lời:**
+
+**Đúng — vi phạm normalization (denormalization có chủ đích):**
+
+```
+Address {
+  level1Id: "01",       level1Name: "Hà Nội"    // Lưu cả ID và Name
+  level2Id: "001",      level2Name: "Ba Đình"
+}
+```
+
+**Lý do denormalize:**
+- MongoDB **không có JOIN** hiệu quả → nếu chỉ lưu ID, mỗi lần hiển thị phải lookup thêm
+- Báo cáo cần hiển thị tên → join hàng triệu record sẽ rất chậm
+- Tên tỉnh/huyện/xã ở Việt Nam **rất hiếm khi thay đổi** (chỉ khi tách/nhập đơn vị hành chính)
+
+**Khi tên thay đổi:**
+- Cập nhật master data (Province/District/Commune)
+- Chạy **batch update** tất cả document có ID tương ứng:
+  ```java
+  mongoTemplate.updateMulti(
+      Query.query(Criteria.where("address.level1Id").is("01")),
+      Update.update("address.level1Name", "Tên mới"),
+      DetailCaseEntity.class
+  );
+  ```
+- Đây là **eventual consistency** — chấp nhận được vì sự kiện này cực kỳ hiếm
+
+---
+
+### Câu 68: Refresh token không được implement ở backend — em có biết không?
+
+**Trả lời:** **Đúng — đây là điểm chưa hoàn thiện.**
+
+**Thực trạng:**
+- `JWTToken.java` có field `refreshToken` nhưng **không bao giờ được populate**
+- `AuthorityServiceImpl.createJwtToken()` chỉ tạo **access token**
+- Frontend có code gọi `AuthApiService.refreshToken()` nhưng backend **chưa có endpoint tương ứng hoạt động đầy đủ**
+
+**Hệ quả:**
+- Access token hạn 24h — user phải đăng nhập lại mỗi 24h
+- Nếu token bị lộ → attacker có 24h để khai thác (thay vì 15-30 phút nếu có refresh token)
+
+**Cách khắc phục:**
+1. Giảm access token xuống **15 phút**
+2. Implement refresh token endpoint — lưu refresh token hash trong DB/Redis
+3. Refresh token hạn 7-30 ngày, **single-use** (rotation) — mỗi lần dùng tạo refresh token mới
+4. Khi refresh → kiểm tra token blacklist + password change time
+
+---
+
+### Câu 69: Hệ thống có hỗ trợ multi-tenancy không? Giải thích header `x-shop-current`.
+
+**Trả lời:**
+
+**Có dấu hiệu thiết kế cho multi-tenancy:**
+- Axios interceptor gắn header `x-shop-current` từ `CurrentShopUtil.getShop()`
+- Entity có thể có `tenantCode` hoặc `shopId` để phân tách data
+- Login API nhận `TenantCode` parameter
+
+**Mục đích:** Cho phép **một hệ thống serve nhiều đơn vị y tế** (tỉnh/huyện khác nhau), mỗi đơn vị chỉ thấy data của mình.
+
+**Trong E-Dengue:** Multi-tenancy giúp triển khai 1 instance phục vụ nhiều **Trung tâm Y tế** khác nhau, mỗi trung tâm chỉ quản lý ca bệnh trong khu vực mình.
+
+---
+
+## XV. Câu hỏi tình huống giả định (Scenario-based)
+
+> **Mức độ: RẤT KHÓ** - Thầy cô muốn kiểm tra khả năng xử lý vấn đề thực tế
+
+### Câu 70: Nếu có 100 user cùng nhập ca bệnh — hệ thống có bị conflict không?
+
+**Trả lời:**
+
+**Trường hợp 1 — Tạo mới (Create):** Không conflict — mỗi user tạo document mới với ID riêng (MongoDB ObjectId unique).
+
+**Trường hợp 2 — Sửa cùng 1 ca bệnh (Update):**
+- Hiện tại: **Last-write-wins** — user cuối cùng save sẽ ghi đè toàn bộ
+- Không có **optimistic locking** (version field để detect conflict)
+
+**Giải pháp nếu cần:**
+- Thêm field `@Version` vào entity → MongoDB tự động check version khi update
+- Nếu version mismatch → throw exception → user phải reload data mới rồi sửa lại
+- Hoặc dùng **field-level update** (`$set` chỉ field thay đổi) thay vì ghi đè toàn bộ document
+
+**Mức độ rủi ro thực tế:** THẤP — trong quy trình y tế, mỗi ca bệnh thường do **1 cán bộ phụ trách**, ít khi 2 người cùng sửa.
+
+---
+
+### Câu 71: Server bị crash giữa lúc đang tạo ca bệnh và tạo report — data có inconsistent không?
+
+**Trả lời:**
+
+**Phân tích:**
+- `@Transactional` annotation đảm bảo rollback toàn bộ nếu exception
+- Nhưng MongoDB **single-document transaction** mặc định — nếu create case thành công nhưng create report thất bại:
+  - Case đã lưu ✓
+  - Report chưa lưu ✗
+  - → **Data inconsistent**
+
+**Giải pháp hiện tại:**
+- Spring Data MongoDB hỗ trợ **multi-document transaction** (từ MongoDB 4.0+)
+- `@Transactional` đã được cấu hình với `ClientSession` → đảm bảo atomicity nếu MongoDB replica set được setup
+
+**Điều kiện:** MongoDB phải chạy ở **Replica Set mode** (không phải standalone) để transaction hoạt động. Trong development (standalone) → transaction không hoạt động → cần lưu ý khi deploy production.
+
+---
+
+### Câu 72: Nếu Redis chết — hệ thống có hoạt động không?
+
+**Trả lời:**
+
+**Ảnh hưởng khi Redis không khả dụng:**
+
+| Chức năng | Ảnh hưởng | Mức độ |
+|-----------|-----------|--------|
+| Token Blacklist | Không kiểm tra được → token đã logout vẫn valid | **Cao** |
+| Caching | Mất cache → mọi query đến MongoDB trực tiếp → chậm hơn | Trung bình |
+| File Token | Không download được file đã generate | Trung bình |
+
+**Hệ thống vẫn hoạt động** nhưng với **security giảm** (token revocation không hoạt động) và **performance giảm** (không có cache).
+
+**Giải pháp:**
+- Config Redisson với **fallback** — catch exception khi Redis unavailable
+- Cho token blacklist: fallback về **in-memory** set (mất khi restart nhưng có còn hơn không)
+- Monitoring: Alert khi Redis connection lost
+- Production: Dùng **Redis Sentinel** hoặc **Redis Cluster** cho high availability
+
+---
+
+### Câu 73: User upload file 100MB — flow xử lý như thế nào? Có bottleneck ở đâu?
+
+**Trả lời:**
+
+**Flow:**
+```
+Browser → [100MB multipart] → Spring Boot (buffer in memory/disk)
+       → Backend validate → SeaweedFS Filer API → Volume Server (lưu file)
+       → Save FileUploadEntity to MongoDB (metadata)
+       → Return file URL to frontend
+```
+
+**Bottleneck:**
+
+1. **Spring Boot multipart buffer:** Mặc định buffer file vào **memory** trước khi xử lý
+   - Config: `spring.servlet.multipart.max-file-size=100MB`
+   - Nếu nhiều user upload cùng lúc → **OutOfMemoryError**
+   - Fix: Dùng `spring.servlet.multipart.file-size-threshold` để buffer ra disk
+
+2. **Network:** Upload 100MB qua mạng chậm → HTTP request timeout
+   - Fix: Tăng timeout, hoặc implement **chunked upload** (chia file thành nhiều phần nhỏ)
+
+3. **SeaweedFS single volume:** Nếu chỉ 1 volume server → bottleneck I/O
+   - Fix: Thêm volume server, SeaweedFS tự load balance
+
+**Cải tiến:** Implement **direct upload** từ browser → SeaweedFS (bypass backend) → gửi file URL về backend để lưu metadata.
+
+---
+
+### Câu 74: Nếu cần thêm chức năng "Chat giữa các cán bộ y tế" — thiết kế thế nào?
+
+**Trả lời:**
+
+**Kiến trúc đề xuất:**
+
+1. **Protocol:** WebSocket (full-duplex, low latency)
+2. **Backend:** Thêm Spring WebSocket module (`spring-boot-starter-websocket`)
+3. **Message Broker:** Redis Pub/Sub hoặc RabbitMQ (nếu multi-instance)
+4. **Storage:** MongoDB collection `ChatMessage` (lưu lịch sử chat)
+5. **Frontend:** Thêm WebSocket client, chat component UI
+
+**Flow:**
+```
+User A gửi message → WebSocket → Backend → Redis Pub/Sub → Broadcast
+                                         → MongoDB (lưu history)
+                                         → WebSocket → User B nhận
+```
+
+**Xác thực:** Dùng JWT token trong WebSocket handshake header để authenticate.
+
+**Tại sao không implement trong đồ án:** Chức năng chat không thuộc **core business** (giám sát dịch tễ), thêm complexity không cần thiết cho scope đồ án.
+
+---
+
+### Câu 75: Hệ thống hiện tại là monolith — nếu chuyển sang microservices thì tách như thế nào?
+
+**Trả lời:**
+
+**Tách theo business domain (bounded context):**
+
+| Microservice | Chức năng | Database |
+|-------------|-----------|----------|
+| **Auth Service** | Login, JWT, Permission, User management | MongoDB (users) |
+| **Epidemic Service** | Dengue Case, Outbreak, Vector, Reports | MongoDB (epidemic) |
+| **Master Data Service** | Province, District, Commune, Dictionary | MongoDB (master) |
+| **Content Service** | Posts, Categories, Projects | MongoDB (content) |
+| **Dashboard Service** | Aggregation, Statistics, Charts | MongoDB (analytics) |
+| **File Service** | Upload, Download, SeaweedFS integration | SeaweedFS |
+| **Notification Service** | Email, Push, In-app notifications | MongoDB (notifications) |
+
+**Thay đổi cần thiết:**
+- **API Gateway:** Kong/Spring Cloud Gateway cho routing
+- **JWT:** Chuyển sang RS256 — Auth Service giữ private key, các service khác dùng public key verify
+- **Service Communication:** REST hoặc gRPC giữa services
+- **Event Bus:** Kafka/RabbitMQ cho async communication (ví dụ: khi tạo ca bệnh → trigger dashboard update)
+
+**Tại sao giữ monolith cho đồ án:** Quy mô nhỏ, team 1 người, monolith **đơn giản hơn** để develop, test, deploy. Microservices chỉ cần khi **team lớn** hoặc **scale independent** từng module.
+
+---
+
+### Câu 76: Em đánh giá đồ án của mình bao nhiêu điểm? Nếu làm lại, em sẽ thay đổi gì?
+
+**Trả lời:**
+
+> **Lưu ý:** Đây là câu hỏi bẫy — đừng tự cho điểm cao quá (tự phụ) hoặc thấp quá (thiếu tự tin). Hãy trả lời **khách quan**.
+
+**Điểm mạnh đã đạt được:**
+- Kiến trúc module rõ ràng, base class giảm code trùng lặp
+- Bảo mật nhiều lớp (JWT, Permission, CAPTCHA, Token Blacklist)
+- GIS integration cho dữ liệu dịch tễ trên bản đồ
+- Dashboard trực quan, đa dạng biểu đồ
+- Đa ngôn ngữ, hỗ trợ theme sáng/tối
+
+**Nếu làm lại, em sẽ thay đổi:**
+1. **Implement refresh token đầy đủ** — giảm thời hạn access token xuống 15 phút
+2. **Thêm WebSocket/SSE** cho real-time notification khi có ổ dịch mới
+3. **Viết unit test** đầy đủ hơn (coverage > 70%)
+4. **Fix XSS** trong map popup và CKEditor config
+5. **Lưu JWT trong HttpOnly Cookie** thay vì localStorage
+6. **Implement offline sync** với Dexie.js đầy đủ
+7. **Thêm CI/CD pipeline** với GitHub Actions
+8. **Dùng Docker Compose** cho toàn bộ stack (bao gồm MongoDB, Redis)
+
+---
+
 ## Lời khuyên khi bảo vệ
 
-> **Các câu hỏi thường được hỏi nhiều nhất:**
->
+### Câu hỏi thường được hỏi nhiều nhất (Mức cơ bản)
+
 > 1. **Kiến trúc tổng thể** (Câu 4) - Phải vẽ được sơ đồ kiến trúc
 > 2. **Authentication/Authorization** (Câu 21, 22) - Giải thích rõ flow JWT
 > 3. **Design Pattern** (Câu 35) - Nắm vững pattern nào dùng ở đâu
 > 4. **Tại sao chọn công nghệ X** (Câu 5, 6, 7) - So sánh ưu/nhược điểm
 > 5. **Hạn chế & hướng phát triển** (Câu 41) - Thể hiện sự trung thực và hiểu biết
+
+### Câu hỏi thầy cô khó tính sẽ hỏi (Mức nâng cao)
+
+> 1. **Lỗ hổng XSS cụ thể** (Câu 49, 51, 57) - Biết rõ vị trí lỗ hổng VÀ cách sửa
+> 2. **JWT storage & refresh token** (Câu 47, 52, 68) - Biết rõ hạn chế và giải pháp
+> 3. **Race condition** (Câu 52) - Giải thích được cơ chế queue trong interceptor
+> 4. **NoSQL Injection / ReDoS** (Câu 48) - Biết regex dùng trực tiếp từ user input
+> 5. **Soft Delete pitfall** (Câu 59) - Biết `findById` không kiểm tra isDeleted
+> 6. **Khi nào hệ thống fail** (Câu 71, 72, 73) - Redis chết, server crash, upload lớn
+> 7. **Câu cuối cùng** (Câu 76) - Luôn chuẩn bị sẵn "nếu làm lại sẽ thay đổi gì"
+
+### Nguyên tắc vàng khi bảo vệ
+
+> - **Thà nói "em chưa implement" còn hơn nói sai** — thầy cô đánh giá cao sự trung thực
+> - **Biết lỗ hổng = biết cách sửa** — nếu tự chỉ ra được hạn chế VÀ giải pháp → điểm cao
+> - **Đừng thuộc lòng** — hiểu nguyên lý để trả lời linh hoạt khi bị hỏi xoáy
+> - **Vẽ sơ đồ** — khi giải thích kiến trúc/flow, vẽ lên bảng sẽ thuyết phục hơn nói miệng
